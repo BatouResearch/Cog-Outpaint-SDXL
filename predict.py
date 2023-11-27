@@ -275,27 +275,6 @@ class Predictor(BasePredictor):
 
         new_image.paste(image, paste_position)
         return new_image
-    
-    def combine_images(self, original, new, outpaint_direction, outpaint_size):
-        """
-        Combines two images by preserving the original image except for the outpainted pixels,
-        which are covered by the new_image.
-        """
-        original_width, original_height = original.size
-
-        if outpaint_direction == 'left':
-            crop_area = (0, 0, outpaint_size, original_height)
-        elif outpaint_direction == 'right':
-            crop_area = (original_width - outpaint_size, 0, original_width, original_height)
-        elif outpaint_direction == 'up':
-            crop_area = (0, 0, original_width, outpaint_size)
-        else:  # 'down'
-            crop_area = (0, original_height - outpaint_size, original_width, original_height)
-
-        cropped_new = new.crop(crop_area)
-        combined_image = original.copy()
-        combined_image.paste(cropped_new, crop_area[:2])
-        return combined_image
 
     
     @torch.inference_mode()
@@ -355,9 +334,6 @@ class Predictor(BasePredictor):
             choices=SCHEDULERS.keys(),
             default="K_EULER",
         ),
-        num_inference_steps: int = Input(
-            description="Number of denoising steps", ge=1, le=500, default=25
-        ),
         guidance_scale: float = Input(
             description="Scale for classifier-free guidance", ge=1, le=50, default=7.5
         ),
@@ -393,17 +369,13 @@ class Predictor(BasePredictor):
         image = self.add_outpaint_pixels(loaded_image, outpaint_direction, outpaint_size, "noise")
         mask  = self.add_outpaint_pixels(loaded_mask, outpaint_direction, outpaint_size, "white")
         control_image = self.add_outpaint_pixels(self.image2canny(loaded_image), outpaint_direction, outpaint_size, "black")
-        image, width, height = self.resize_image(image)
+        image, _, _ = self.resize_image(image)
         mask, _, _ = self.resize_image(mask)
         control_image, _, _ = self.resize_image(control_image)
-        image.save("actual_image.jpg")
 
         sdxl_kwargs["image"] = image
         sdxl_kwargs["mask_image"] = mask
         sdxl_kwargs["control_image"] = control_image
-        sdxl_kwargs["controlnet_conditioning_scale"] = condition_scale
-        sdxl_kwargs["width"] = width
-        sdxl_kwargs["height"] = height
         pipe = self.pipe
 
         if not apply_watermark:
@@ -419,24 +391,24 @@ class Predictor(BasePredictor):
             "negative_prompt": [negative_prompt] * num_outputs,
             "guidance_scale": guidance_scale,
             "generator": generator,
+            "controlnet_conditioning_scale": condition_scale
         }
-
-        first_run_steps = 5
-        second_run_steps = 25
-        
 
         if self.is_lora:
             sdxl_kwargs["cross_attention_kwargs"] = {"scale": lora_scale}
-            
-        sdxl_kwargs["num_inference_steps"] = first_run_steps
-        sdxl_kwargs["strength"] = 0.99
-        output = pipe(**common_args, **sdxl_kwargs)
-        output.images[0].save("first.jpg")
 
+        first_run_steps = 10
+        second_run_steps = 20
+        # First Run
+        sdxl_kwargs["num_inference_steps"] = first_run_steps
+        sdxl_kwargs["strength"] = 1
+        output = pipe(**common_args, **sdxl_kwargs)
+        new_canny = self.image2canny(output.images[0])
+
+        # Second Run
         sdxl_kwargs["num_inference_steps"] = second_run_steps
         sdxl_kwargs["strength"] = 0.99
-        sdxl_kwargs["image"] = self.combine_images(image, output.images[0], outpaint_direction, outpaint_size)
-        sdxl_kwargs["image"].save("second.jpg")
+        sdxl_kwargs["control_image"] = new_canny
         output = pipe(**common_args, **sdxl_kwargs)
 
         if not apply_watermark:
