@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from cog import BasePredictor, Input, Path
 from PIL import Image
+import cv2
 from diffusers import (
     DDIMScheduler,
     DiffusionPipeline,
@@ -29,6 +30,7 @@ from diffusers.utils import load_image
 from safetensors.torch import load_file
 from transformers import CLIPImageProcessor
 from dataset_and_utils import TokenEmbeddingsHandler
+
 
 CONTROL_CACHE = "control-cache"
 SDXL_MODEL_CACHE = "./sdxl-cache"
@@ -193,11 +195,16 @@ class Predictor(BasePredictor):
         shutil.copyfile(path, "/tmp/image.png")
         return load_image("/tmp/image.png").convert("RGB")
     
+    def image2canny(self, image):
+        image = np.array(image)
+        image = cv2.Canny(image, 100, 200)
+        image = image[:, :, None]
+        image = np.concatenate([image, image, image], axis=2)
+        return Image.fromarray(image)
+    
     def resize_image(self, image):
         image_width, image_height = image.size
-        print("Original width:"+str(image_width)+", height:"+str(image_height))
         new_width, new_height = self.resize_to_allowed_dimensions(image_width, image_height)
-        print("new_width:"+str(new_width)+", new_height:"+str(new_height))
         image = image.resize((new_width, new_height))
         return image, new_width, new_height
     
@@ -220,7 +227,6 @@ class Predictor(BasePredictor):
         ]
         # Calculate the aspect ratio
         aspect_ratio = width / height
-        print(f"Aspect Ratio: {aspect_ratio:.2f}")
         # Find the closest allowed dimensions that maintain the aspect ratio
         closest_dimensions = min(
             allowed_dimensions,
@@ -239,19 +245,10 @@ class Predictor(BasePredictor):
         )
         return image, has_nsfw_concept
 
-    def make_inpaint_condition(self, image, image_mask):
-        image = np.array(image.convert("RGB")).astype(np.float32) / 255.0
-        image_mask = np.array(image_mask.convert("L")).astype(np.float32) / 255.0
-
-        assert image.shape[0:1] == image_mask.shape[0:1]
-        image[image_mask > 0.5] = 1.0  # set as masked pixel
-        image = np.expand_dims(image, 0).transpose(0, 3, 1, 2)
-        image = torch.from_numpy(image)
-        return image
-
-    def add_outpaint_pixels(self, image, outpaint_direction, outpaint_size, color):
+    def add_outpaint_pixels(self, image, outpaint_direction, outpaint_size, color, block_size=4):
         """
-        Outpaints the given PIL image in the specified direction by the given size with white pixels.
+        Outpaints the given PIL image in the specified direction by the given size.
+        If the color is 'noise', it outpaints with blocky (4x4 by default) noisy pixels.
         """
         original_width, original_height = image.size
 
@@ -268,10 +265,39 @@ class Predictor(BasePredictor):
             new_size = (original_width, original_height + outpaint_size)
             paste_position = (0, 0)
 
-        new_image = Image.new("RGB", new_size, color)
+        if color == 'noise':
+            noise_array_size = (new_size[1] // block_size, new_size[0] // block_size)
+            small_noise = np.random.randint(0, 256, (noise_array_size[0], noise_array_size[1], 3), dtype=np.uint8)
+            large_noise = np.kron(small_noise, np.ones((block_size, block_size, 1)))
+            new_image = Image.fromarray(large_noise.astype(np.uint8))
+        else:
+            new_image = Image.new("RGB", new_size, color)
+
         new_image.paste(image, paste_position)
         return new_image
+    
+    def combine_images(self, original, new, outpaint_direction, outpaint_size):
+        """
+        Combines two images by preserving the original image except for the outpainted pixels,
+        which are covered by the new_image.
+        """
+        original_width, original_height = original.size
 
+        if outpaint_direction == 'left':
+            crop_area = (0, 0, outpaint_size, original_height)
+        elif outpaint_direction == 'right':
+            crop_area = (original_width - outpaint_size, 0, original_width, original_height)
+        elif outpaint_direction == 'up':
+            crop_area = (0, 0, original_width, outpaint_size)
+        else:  # 'down'
+            crop_area = (0, original_height - outpaint_size, original_width, original_height)
+
+        cropped_new = new.crop(crop_area)
+        combined_image = original.copy()
+        combined_image.paste(cropped_new, crop_area[:2])
+        return combined_image
+
+    
     @torch.inference_mode()
     def predict(
         self,
@@ -286,8 +312,8 @@ class Predictor(BasePredictor):
         ),
         outpaint_size: int = Input(
             description="How many pixels the mask should grow in the chosen direction",
-            ge=512,
-            le=128,
+            ge=128,
+            le=512,
             default=128
         ),
         image: Path = Input(
@@ -300,7 +326,7 @@ class Predictor(BasePredictor):
         ),
         condition_scale: float = Input(
             description="The bigger this number is, the more ControlNet interferes",
-            default=0.5,
+            default=0.95,
             ge=0.0,
             le=1.0,
         ),
@@ -330,7 +356,7 @@ class Predictor(BasePredictor):
             default="K_EULER",
         ),
         num_inference_steps: int = Input(
-            description="Number of denoising steps", ge=1, le=500, default=50
+            description="Number of denoising steps", ge=1, le=500, default=25
         ),
         guidance_scale: float = Input(
             description="Scale for classifier-free guidance", ge=1, le=50, default=7.5
@@ -361,15 +387,20 @@ class Predictor(BasePredictor):
             # consistency with fine-tuning API
             for k, v in self.token_map.items():
                 prompt = prompt.replace(k, v)
-
-
-        image = self.add_outpaint_pixels(self.load_image(image), outpaint_direction, outpaint_size, "black")
-        mask  = self.add_outpaint_pixels(self.load_image(mask), outpaint_direction, outpaint_size, "white")
+        
+        loaded_image = self.load_image(image)
+        loaded_mask = self.load_image(mask)
+        image = self.add_outpaint_pixels(loaded_image, outpaint_direction, outpaint_size, "noise")
+        mask  = self.add_outpaint_pixels(loaded_mask, outpaint_direction, outpaint_size, "white")
+        control_image = self.add_outpaint_pixels(self.image2canny(loaded_image), outpaint_direction, outpaint_size, "black")
         image, width, height = self.resize_image(image)
+        mask, _, _ = self.resize_image(mask)
+        control_image, _, _ = self.resize_image(control_image)
+        image.save("actual_image.jpg")
 
         sdxl_kwargs["image"] = image
-        sdxl_kwargs["mask"] = mask
-        sdxl_kwargs["control_image"] = self.make_inpaint_condition(image, mask)
+        sdxl_kwargs["mask_image"] = mask
+        sdxl_kwargs["control_image"] = control_image
         sdxl_kwargs["controlnet_conditioning_scale"] = condition_scale
         sdxl_kwargs["width"] = width
         sdxl_kwargs["height"] = height
@@ -388,12 +419,24 @@ class Predictor(BasePredictor):
             "negative_prompt": [negative_prompt] * num_outputs,
             "guidance_scale": guidance_scale,
             "generator": generator,
-            "num_inference_steps": num_inference_steps,
         }
+
+        first_run_steps = 5
+        second_run_steps = 25
+        
 
         if self.is_lora:
             sdxl_kwargs["cross_attention_kwargs"] = {"scale": lora_scale}
+            
+        sdxl_kwargs["num_inference_steps"] = first_run_steps
+        sdxl_kwargs["strength"] = 0.99
+        output = pipe(**common_args, **sdxl_kwargs)
+        output.images[0].save("first.jpg")
 
+        sdxl_kwargs["num_inference_steps"] = second_run_steps
+        sdxl_kwargs["strength"] = 0.99
+        sdxl_kwargs["image"] = self.combine_images(image, output.images[0], outpaint_direction, outpaint_size)
+        sdxl_kwargs["image"].save("second.jpg")
         output = pipe(**common_args, **sdxl_kwargs)
 
         if not apply_watermark:
