@@ -3,11 +3,9 @@ from diffusers import AutoencoderKL, DiffusionPipeline, ControlNetModel
 from diffusers.pipelines.stable_diffusion.safety_checker import (
     StableDiffusionSafetyChecker,
 )
-from transformers import DPTFeatureExtractor, DPTForDepthEstimation
 
 
 CONTROLC_CACHE = "control-canny-cache"
-CONTROLD_CACHE = "control-depth-cache"
 SDXL_MODEL_CACHE = "./sdxl-cache"
 SAFETY_CACHE = "./safety-cache"
 FEATURE_CACHE = "feature-cache"
@@ -37,15 +35,3 @@ controlnet = ControlNetModel.from_pretrained(
     torch_dtype=torch.float16
 )
 controlnet.save_pretrained(CONTROLC_CACHE)
-
-controlnet = ControlNetModel.from_pretrained(
-    "diffusers/controlnet-depth-sdxl-1.0",
-    torch_dtype=torch.float16
-)
-controlnet.save_pretrained(CONTROLD_CACHE)
-
-depth_estimator = DPTForDepthEstimation.from_pretrained(FEATURE_NAME)
-depth_estimator.save_pretrained(FEATURE_CACHE)
-
-feature_extractor = DPTFeatureExtractor.from_pretrained(FEATURE_NAME)
-feature_extractor.save_pretrained(FEATURE_CACHE)

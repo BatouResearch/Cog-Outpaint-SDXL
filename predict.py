@@ -26,15 +26,14 @@ from diffusers.models.attention_processor import LoRAAttnProcessor2_0
 from diffusers.pipelines.stable_diffusion.safety_checker import (
     StableDiffusionSafetyChecker,
 )
-from transformers import DPTFeatureExtractor, DPTForDepthEstimation
 from diffusers.utils import load_image
 from safetensors.torch import load_file
 from transformers import CLIPImageProcessor
 from dataset_and_utils import TokenEmbeddingsHandler
+import patch_match
 
 
 CONTROLC_CACHE = "control-canny-cache"
-CONTROLD_CACHE = "control-depth-cache"
 SDXL_MODEL_CACHE = "./sdxl-cache"
 SAFETY_CACHE = "./safety-cache"
 FEATURE_EXTRACTOR = "./feature-extractor"
@@ -169,8 +168,6 @@ class Predictor(BasePredictor):
             SAFETY_CACHE, torch_dtype=torch.float16
         ).to("cuda")
         self.feature_extractor = CLIPImageProcessor.from_pretrained(FEATURE_EXTRACTOR)
-        self.depth_estimator = DPTForDepthEstimation.from_pretrained(FEATURE_CACHE).to("cuda")
-        self.feature_depth_extractor = DPTFeatureExtractor.from_pretrained(FEATURE_CACHE)
 
         if not os.path.exists(SDXL_MODEL_CACHE):
             download_weights(SDXL_URL, SDXL_MODEL_CACHE)
@@ -206,28 +203,7 @@ class Predictor(BasePredictor):
         image = image[:, :, None]
         image = np.concatenate([image, image, image], axis=2)
         return Image.fromarray(image)
-    
-    def get_depth_map(self, image):
-        og_size = image.size
-        image = self.feature_depth_extractor(images=image, return_tensors="pt").pixel_values.to("cuda")
-        with torch.no_grad(), torch.autocast("cuda"):
-            depth_map = self.depth_estimator(image).predicted_depth
 
-        height, width = image.shape[2], image.shape[3]
-
-        depth_map = torch.nn.functional.interpolate(
-            depth_map.unsqueeze(1),
-            size=(height, width),
-            mode="bicubic",
-            align_corners=False,
-        )
-        depth_min = torch.amin(depth_map, dim=[1, 2, 3], keepdim=True)
-        depth_max = torch.amax(depth_map, dim=[1, 2, 3], keepdim=True)
-        depth_map = (depth_map - depth_min) / (depth_max - depth_min)
-        image = torch.cat([depth_map] * 3, dim=1)
-        image = image.permute(0, 2, 3, 1).cpu().numpy()[0]
-        image = Image.fromarray((image * 255.0).clip(0, 255).astype(np.uint8))
-        return image.resize(og_size)
     
     def combine_images(self, original, new, outpaint_direction, outpaint_size):
         """
@@ -314,36 +290,37 @@ class Predictor(BasePredictor):
         )
         return image, has_nsfw_concept
 
-    def add_outpaint_pixels(self, image, outpaint_direction, outpaint_size, color, block_size=8):
+    def add_outpaint_pixels_with_pypatchmatch(image, outpaint_direction, outpaint_size):
         """
-        Outpaints the given PIL image in the specified direction by the given size.
-        If the color is 'noise', it outpaints with blocky (4x4 by default) noisy pixels.
+        Outpaints the given PIL image in the specified direction by the given size using PyPatchMatch.
         """
         original_width, original_height = image.size
+        mask = Image.new("L", (original_width, original_height), 0)  # Black mask
 
+        # Define the area to be outpainted on the mask
         if outpaint_direction == 'left':
-            new_size = (original_width + outpaint_size, original_height)
-            paste_position = (outpaint_size, 0)
+            mask.paste(255, (0, 0, outpaint_size, original_height))
         elif outpaint_direction == 'right':
-            new_size = (original_width + outpaint_size, original_height)
-            paste_position = (0, 0)
+            mask.paste(255, (original_width - outpaint_size, 0, original_width, original_height))
         elif outpaint_direction == 'up':
-            new_size = (original_width, original_height + outpaint_size)
-            paste_position = (0, outpaint_size)
+            mask.paste(255, (0, 0, original_width, outpaint_size))
         else:  # 'down'
-            new_size = (original_width, original_height + outpaint_size)
-            paste_position = (0, 0)
+            mask.paste(255, (0, original_height - outpaint_size, original_width, original_height))
 
-        if color == 'noise':
-            noise_array_size = (new_size[1] // block_size, new_size[0] // block_size)
-            small_noise = np.random.randint(0, 256, (noise_array_size[0], noise_array_size[1], 3), dtype=np.uint8)
-            large_noise = np.kron(small_noise, np.ones((block_size, block_size, 1)))
-            new_image = Image.fromarray(large_noise.astype(np.uint8))
+        if patch_match.patchmatch_available:
+            # Convert the PIL image to a numpy array if it's not already
+            image_np = np.array(image)
+            mask_np = np.array(mask)
+
+            # Use patch_match to inpaint the image
+            result = patch_match.inpaint(image_np, mask_np, patch_size=3)
+
+            # Convert the result back to a PIL Image and return it
+            result_image = Image.fromarray(result)
+            return result_image
         else:
-            new_image = Image.new("RGB", new_size, color)
-
-        new_image.paste(image, paste_position)
-        return new_image
+            print("PatchMatch is not available.")
+            return image
 
     
     @torch.inference_mode()
@@ -440,8 +417,6 @@ class Predictor(BasePredictor):
         mask  = self.add_outpaint_pixels(loaded_mask, outpaint_direction, outpaint_size, "white")
         mask.save("actual_mask.jpg")
         control_canny_image = self.add_outpaint_pixels(self.image2canny(loaded_image), outpaint_direction, outpaint_size, "black")
-        control_depth_image = self.add_outpaint_pixels(self.get_depth_map(loaded_image), outpaint_direction, outpaint_size, "black")
-        control_depth_image.save("depth.jpg")
         control_canny_image.save("canny.jpg")
 
         sdxl_kwargs["image"] = image
@@ -474,7 +449,6 @@ class Predictor(BasePredictor):
         sdxl_kwargs["strength"] = 1
         output = pipe(**common_args, **sdxl_kwargs)
         new_canny = self.image2canny(output.images[0])
-        new_depth = self.get_depth_map(output.images[0])
 
         # Second Run
         sdxl_kwargs["num_inference_steps"] = second_run_steps
