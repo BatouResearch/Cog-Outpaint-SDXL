@@ -30,7 +30,7 @@ from diffusers.utils import load_image
 from safetensors.torch import load_file
 from transformers import CLIPImageProcessor
 from dataset_and_utils import TokenEmbeddingsHandler
-import patch_match
+from patchmatch import patch_match
 
 
 CONTROLC_CACHE = "control-canny-cache"
@@ -204,7 +204,6 @@ class Predictor(BasePredictor):
         image = np.concatenate([image, image, image], axis=2)
         return Image.fromarray(image)
 
-    
     def combine_images(self, original, new, outpaint_direction, outpaint_size):
         """
         Combines two images by preserving the original image except for the outpainted pixels,
@@ -290,38 +289,66 @@ class Predictor(BasePredictor):
         )
         return image, has_nsfw_concept
 
-    def add_outpaint_pixels_with_pypatchmatch(image, outpaint_direction, outpaint_size):
+    def patchmatch(self, image, outpaint_direction, outpaint_size):
         """
         Outpaints the given PIL image in the specified direction by the given size using PyPatchMatch.
         """
         original_width, original_height = image.size
-        mask = Image.new("L", (original_width, original_height), 0)  # Black mask
 
-        # Define the area to be outpainted on the mask
+        # Define new size and position to paste the original image
         if outpaint_direction == 'left':
-            mask.paste(255, (0, 0, outpaint_size, original_height))
+            new_size = (original_width + outpaint_size, original_height)
+            paste_position = (outpaint_size, 0)
+            mask_area = (0, 0, outpaint_size, original_height)
         elif outpaint_direction == 'right':
-            mask.paste(255, (original_width - outpaint_size, 0, original_width, original_height))
+            new_size = (original_width + outpaint_size, original_height)
+            paste_position = (0, 0)
+            mask_area = (original_width, 0, original_width + outpaint_size, original_height)
         elif outpaint_direction == 'up':
-            mask.paste(255, (0, 0, original_width, outpaint_size))
+            new_size = (original_width, original_height + outpaint_size)
+            paste_position = (0, outpaint_size)
+            mask_area = (0, 0, original_width, outpaint_size)
         else:  # 'down'
-            mask.paste(255, (0, original_height - outpaint_size, original_width, original_height))
+            new_size = (original_width, original_height + outpaint_size)
+            paste_position = (0, 0)
+            mask_area = (0, original_height, original_width, original_height + outpaint_size)
+
+        new_image = Image.new("RGB", new_size)
+        new_image.paste(image, paste_position)
+
+        mask = Image.new("L", new_size, 0)  # Entirely black
+        mask.paste(255, mask_area)  # White in the area to be outpainted
 
         if patch_match.patchmatch_available:
-            # Convert the PIL image to a numpy array if it's not already
-            image_np = np.array(image)
-            mask_np = np.array(mask)
-
-            # Use patch_match to inpaint the image
-            result = patch_match.inpaint(image_np, mask_np, patch_size=3)
-
-            # Convert the result back to a PIL Image and return it
-            result_image = Image.fromarray(result)
-            return result_image
+            result = patch_match.inpaint(np.array(new_image), np.array(mask), patch_size=3)
+            return Image.fromarray(result)
         else:
             print("PatchMatch is not available.")
-            return image
+            return new_image
+        
+    def add_outpaint_pixels(self, image, outpaint_direction, outpaint_size, color):
+        """
+        Outpaints the given PIL image in the specified direction by the given size.
+        If the color is 'noise', it outpaints with blocky (4x4 by default) noisy pixels.
+        """
+        original_width, original_height = image.size
 
+        if outpaint_direction == 'left':
+            new_size = (original_width + outpaint_size, original_height)
+            paste_position = (outpaint_size, 0)
+        elif outpaint_direction == 'right':
+            new_size = (original_width + outpaint_size, original_height)
+            paste_position = (0, 0)
+        elif outpaint_direction == 'up':
+            new_size = (original_width, original_height + outpaint_size)
+            paste_position = (0, outpaint_size)
+        else:  # 'down'
+            new_size = (original_width, original_height + outpaint_size)
+            paste_position = (0, 0)
+
+        new_image = Image.new("RGB", new_size, color)
+        new_image.paste(image, paste_position)
+        return new_image
     
     @torch.inference_mode()
     def predict(
@@ -412,12 +439,10 @@ class Predictor(BasePredictor):
         
         loaded_image = self.load_image(image)
         loaded_mask = self.load_image(mask)
-        image = self.add_outpaint_pixels(loaded_image, outpaint_direction, outpaint_size, "black")
-        
+        image = self.patchmatch(loaded_image, outpaint_direction, outpaint_size)
         mask  = self.add_outpaint_pixels(loaded_mask, outpaint_direction, outpaint_size, "white")
-        mask.save("actual_mask.jpg")
         control_canny_image = self.add_outpaint_pixels(self.image2canny(loaded_image), outpaint_direction, outpaint_size, "black")
-        control_canny_image.save("canny.jpg")
+        print(image.size, mask.size, control_canny_image.size)
 
         sdxl_kwargs["image"] = image
         sdxl_kwargs["mask_image"] = mask
@@ -442,23 +467,12 @@ class Predictor(BasePredictor):
         if self.is_lora:
             sdxl_kwargs["cross_attention_kwargs"] = {"scale": lora_scale}
 
-        first_run_steps = 15
-        second_run_steps = 16
+        first_run_steps = 25
         # First Run
         sdxl_kwargs["num_inference_steps"] = first_run_steps
-        sdxl_kwargs["strength"] = 1
-        output = pipe(**common_args, **sdxl_kwargs)
-        new_canny = self.image2canny(output.images[0])
-
-        # Second Run
-        sdxl_kwargs["num_inference_steps"] = second_run_steps
         sdxl_kwargs["strength"] = 0.99
-        sdxl_kwargs["control_image"] = self.blacken_outpaint_intersection(new_canny, outpaint_direction, outpaint_size)
-        sdxl_kwargs["control_image"].save("canny.jpg")
-        sdxl_kwargs["image"] = self.combine_images(loaded_image, output.images[0], outpaint_direction, outpaint_size)
-        self.combine_images(loaded_image, output.images[0], outpaint_direction, outpaint_size).save("combined.jpg")
         output = pipe(**common_args, **sdxl_kwargs)
-
+        
         if not apply_watermark:
             pipe.watermark = watermark_cache
 

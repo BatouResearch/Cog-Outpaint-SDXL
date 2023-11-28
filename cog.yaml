@@ -24,11 +24,14 @@ build:
     - "fire==0.5.0"
     - "opencv-python>=4.1.0.25"
     - "mediapipe==0.10.2"
-    - "PyPatchMatch==1.0.1"
+    - "pypatchmatch==1.0.1"
 
   run:
+    - apt update
+    - apt install build-essential
     - curl -o /usr/local/bin/pget -L "https://github.com/replicate/pget/releases/download/v0.0.3/pget" && chmod +x /usr/local/bin/pget
     - wget http://thegiflibrary.tumblr.com/post/11565547760 -O face_landmarker_v2_with_blendshapes.task -q https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
+    - apt install -y python3-opencv libopencv-dev
     
 predict: "predict.py:Predictor"
 train: "train.py:train"
