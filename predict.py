@@ -9,7 +9,7 @@ from weights import WeightsDownloadCache
 import numpy as np
 import torch
 from cog import BasePredictor, Input, Path
-from PIL import Image
+from PIL import Image, ImageDraw
 import cv2
 from diffusers import (
     DDIMScheduler,
@@ -26,16 +26,19 @@ from diffusers.models.attention_processor import LoRAAttnProcessor2_0
 from diffusers.pipelines.stable_diffusion.safety_checker import (
     StableDiffusionSafetyChecker,
 )
+from transformers import DPTFeatureExtractor, DPTForDepthEstimation
 from diffusers.utils import load_image
 from safetensors.torch import load_file
 from transformers import CLIPImageProcessor
 from dataset_and_utils import TokenEmbeddingsHandler
 
 
-CONTROL_CACHE = "control-cache"
+CONTROLC_CACHE = "control-canny-cache"
+CONTROLD_CACHE = "control-depth-cache"
 SDXL_MODEL_CACHE = "./sdxl-cache"
 SAFETY_CACHE = "./safety-cache"
 FEATURE_EXTRACTOR = "./feature-extractor"
+FEATURE_CACHE = "feature-cache"
 SDXL_URL = "https://weights.replicate.delivery/default/sdxl/sdxl-vae-upcast-fix.tar"
 SAFETY_URL = "https://weights.replicate.delivery/default/sdxl/safety-1.0.tar"
 
@@ -166,19 +169,21 @@ class Predictor(BasePredictor):
             SAFETY_CACHE, torch_dtype=torch.float16
         ).to("cuda")
         self.feature_extractor = CLIPImageProcessor.from_pretrained(FEATURE_EXTRACTOR)
+        self.depth_estimator = DPTForDepthEstimation.from_pretrained(FEATURE_CACHE).to("cuda")
+        self.feature_depth_extractor = DPTFeatureExtractor.from_pretrained(FEATURE_CACHE)
 
         if not os.path.exists(SDXL_MODEL_CACHE):
             download_weights(SDXL_URL, SDXL_MODEL_CACHE)
 
-        controlnet = ControlNetModel.from_pretrained(
-            CONTROL_CACHE,
+        controlnet_canny = ControlNetModel.from_pretrained(
+            CONTROLC_CACHE,
             torch_dtype=torch.float16,
         )
 
         print("Loading SDXL Controlnet pipeline...")
         self.pipe = StableDiffusionXLControlNetInpaintPipeline.from_pretrained(
             SDXL_MODEL_CACHE,
-            controlnet=controlnet,
+            controlnet=controlnet_canny,
             torch_dtype=torch.float16,
             use_safetensors=True,
             variant="fp16",
@@ -201,6 +206,70 @@ class Predictor(BasePredictor):
         image = image[:, :, None]
         image = np.concatenate([image, image, image], axis=2)
         return Image.fromarray(image)
+    
+    def get_depth_map(self, image):
+        og_size = image.size
+        image = self.feature_depth_extractor(images=image, return_tensors="pt").pixel_values.to("cuda")
+        with torch.no_grad(), torch.autocast("cuda"):
+            depth_map = self.depth_estimator(image).predicted_depth
+
+        height, width = image.shape[2], image.shape[3]
+
+        depth_map = torch.nn.functional.interpolate(
+            depth_map.unsqueeze(1),
+            size=(height, width),
+            mode="bicubic",
+            align_corners=False,
+        )
+        depth_min = torch.amin(depth_map, dim=[1, 2, 3], keepdim=True)
+        depth_max = torch.amax(depth_map, dim=[1, 2, 3], keepdim=True)
+        depth_map = (depth_map - depth_min) / (depth_max - depth_min)
+        image = torch.cat([depth_map] * 3, dim=1)
+        image = image.permute(0, 2, 3, 1).cpu().numpy()[0]
+        image = Image.fromarray((image * 255.0).clip(0, 255).astype(np.uint8))
+        return image.resize(og_size)
+    
+    def combine_images(self, original, new, outpaint_direction, outpaint_size):
+        """
+        Combines two images by preserving the original image except for the outpainted pixels,
+        which are covered by the new_image.
+
+        """
+        original_width, original_height = original.size
+
+        if outpaint_direction == 'left':
+            paste_position = (outpaint_size, 0)
+        elif outpaint_direction == 'right':
+            paste_position = (0, 0)
+        elif outpaint_direction == 'up':
+            paste_position = (0, outpaint_size)
+        else:  # 'down'
+            paste_position = (0, 0)
+
+        new.paste(original, paste_position)
+        return new
+    
+    def blacken_outpaint_intersection(self, image, outpaint_direction, outpaint_size):
+        """
+        Draws a black line of width 7 pixels at the boundary of the outpainted area.
+        The line is horizontal for 'up' and 'down' directions, and vertical for 'left' and 'right' directions.
+        """
+        original_width, original_height = image.size
+        line_width = 7  # Width of the black line
+        draw_area = None
+
+        if outpaint_direction == 'left':
+            draw_area = (outpaint_size - 4, 0, outpaint_size + 3, original_height)
+        elif outpaint_direction == 'right':
+            draw_area = (original_width - outpaint_size - 4, 0, original_width - outpaint_size + 3, original_height)
+        elif outpaint_direction == 'up':
+            draw_area = (0, outpaint_size - 4, original_width, outpaint_size + 3)
+        elif outpaint_direction == 'down':
+            draw_area = (0, original_height - outpaint_size - 4, original_width, original_height - outpaint_size + 3)
+
+        draw = ImageDraw.Draw(image)
+        draw.rectangle(draw_area, fill="black")
+        return image
     
     def resize_image(self, image):
         image_width, image_height = image.size
@@ -245,7 +314,7 @@ class Predictor(BasePredictor):
         )
         return image, has_nsfw_concept
 
-    def add_outpaint_pixels(self, image, outpaint_direction, outpaint_size, color, block_size=4):
+    def add_outpaint_pixels(self, image, outpaint_direction, outpaint_size, color, block_size=8):
         """
         Outpaints the given PIL image in the specified direction by the given size.
         If the color is 'noise', it outpaints with blocky (4x4 by default) noisy pixels.
@@ -305,7 +374,7 @@ class Predictor(BasePredictor):
         ),
         condition_scale: float = Input(
             description="The bigger this number is, the more ControlNet interferes",
-            default=0.95,
+            default=0.25,
             ge=0.0,
             le=1.0,
         ),
@@ -317,7 +386,7 @@ class Predictor(BasePredictor):
             description="LoRA additive scale. Only applicable on trained models.",
             ge=0.0,
             le=1.0,
-            default=0.6,
+            default=0.8,
         ),
         negative_prompt: str = Input(
             description="Input Negative Prompt",
@@ -366,16 +435,18 @@ class Predictor(BasePredictor):
         
         loaded_image = self.load_image(image)
         loaded_mask = self.load_image(mask)
-        image = self.add_outpaint_pixels(loaded_image, outpaint_direction, outpaint_size, "noise")
+        image = self.add_outpaint_pixels(loaded_image, outpaint_direction, outpaint_size, "black")
+        
         mask  = self.add_outpaint_pixels(loaded_mask, outpaint_direction, outpaint_size, "white")
-        control_image = self.add_outpaint_pixels(self.image2canny(loaded_image), outpaint_direction, outpaint_size, "black")
-        image, _, _ = self.resize_image(image)
-        mask, _, _ = self.resize_image(mask)
-        control_image, _, _ = self.resize_image(control_image)
+        mask.save("actual_mask.jpg")
+        control_canny_image = self.add_outpaint_pixels(self.image2canny(loaded_image), outpaint_direction, outpaint_size, "black")
+        control_depth_image = self.add_outpaint_pixels(self.get_depth_map(loaded_image), outpaint_direction, outpaint_size, "black")
+        control_depth_image.save("depth.jpg")
+        control_canny_image.save("canny.jpg")
 
         sdxl_kwargs["image"] = image
         sdxl_kwargs["mask_image"] = mask
-        sdxl_kwargs["control_image"] = control_image
+        sdxl_kwargs["control_image"] = control_canny_image
         pipe = self.pipe
 
         if not apply_watermark:
@@ -391,24 +462,27 @@ class Predictor(BasePredictor):
             "negative_prompt": [negative_prompt] * num_outputs,
             "guidance_scale": guidance_scale,
             "generator": generator,
-            "controlnet_conditioning_scale": condition_scale
         }
 
         if self.is_lora:
             sdxl_kwargs["cross_attention_kwargs"] = {"scale": lora_scale}
 
-        first_run_steps = 10
-        second_run_steps = 20
+        first_run_steps = 15
+        second_run_steps = 16
         # First Run
         sdxl_kwargs["num_inference_steps"] = first_run_steps
         sdxl_kwargs["strength"] = 1
         output = pipe(**common_args, **sdxl_kwargs)
         new_canny = self.image2canny(output.images[0])
+        new_depth = self.get_depth_map(output.images[0])
 
         # Second Run
         sdxl_kwargs["num_inference_steps"] = second_run_steps
         sdxl_kwargs["strength"] = 0.99
-        sdxl_kwargs["control_image"] = new_canny
+        sdxl_kwargs["control_image"] = self.blacken_outpaint_intersection(new_canny, outpaint_direction, outpaint_size)
+        sdxl_kwargs["control_image"].save("canny.jpg")
+        sdxl_kwargs["image"] = self.combine_images(loaded_image, output.images[0], outpaint_direction, outpaint_size)
+        self.combine_images(loaded_image, output.images[0], outpaint_direction, outpaint_size).save("combined.jpg")
         output = pipe(**common_args, **sdxl_kwargs)
 
         if not apply_watermark:
