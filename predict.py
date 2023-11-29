@@ -297,7 +297,7 @@ class Predictor(BasePredictor):
         ),
         condition_scale: float = Input(
             description="The bigger this number is, the more ControlNet interferes",
-            default=0.25,
+            default=0.15,
             ge=0.0,
             le=1.0,
         ),
@@ -367,16 +367,17 @@ class Predictor(BasePredictor):
         generator = torch.Generator("cuda").manual_seed(seed)
         
         loaded_image = self.load_image(image)
+        print("Applying smart preprocessing...")
         sdxl_kwargs["image"] = fill_outpaint_area(loaded_image, outpaint_direction, outpaint_size, "patch")
         sdxl_kwargs["mask_image"] = fill_outpaint_area(loaded_image, outpaint_direction, outpaint_size, "white", is_mask=True)
-        sdxl_kwargs["control_image"] = self.image2canny(image)
-
+        sdxl_kwargs["control_image"] = self.image2canny(sdxl_kwargs["image"])
+        
         common_args = {
             "prompt": [prompt] * num_outputs,
             "negative_prompt": [negative_prompt] * num_outputs,
             "guidance_scale": guidance_scale,
             "generator": generator,
-            "condition_scale": condition_scale,
+            "controlnet_conditioning_scale": condition_scale,
             "num_inference_steps": 20,
             "strength": 0.99
         }

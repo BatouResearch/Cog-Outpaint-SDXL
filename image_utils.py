@@ -1,7 +1,7 @@
 from PIL import Image, ImageDraw
 import numpy as np
 from patchmatch import patch_match
-
+import time
 
 def fill_outpaint_area(image, outpaint_direction, outpaint_size, color, is_mask=False):
     original_width, original_height = image.size
@@ -35,14 +35,19 @@ def fill_with_patchmatch(image, outpaint_direction, outpaint_size):
     mask = Image.new("L", new_size, 0)  # Entirely black
     mask_area = {
         'left': (0, 0, outpaint_size, original_height),
-        'right': (original_width, 0, original_width + outpaint_size, original_height),
+        'right': (original_width - outpaint_size, 0, original_width, original_height),
         'up': (0, 0, original_width, outpaint_size),
-        'down': (0, original_height, original_width, original_height + outpaint_size)
+        'down': (0, original_height - outpaint_size, original_width, original_height)
     }[outpaint_direction]
     mask.paste(255, mask_area)  # White in the area to be outpainted
 
     if patch_match.patchmatch_available:
-        result = patch_match.inpaint(np.array(image), np.array(mask), patch_size=3)
+        start_time = time.time() * 1000  # Get the current time in milliseconds
+        print("Running PatchMatch")
+        result = patch_match.inpaint(np.array(image), np.array(mask), patch_size=2)
+        end_time = time.time() * 1000  # Get the current time again after the function has completed
+        elapsed_time_ms = end_time - start_time
+        print(f"PatchMatch completed, time taken: {elapsed_time_ms} ms")
         return Image.fromarray(result)
     else:
         print("PatchMatch is not available.")
