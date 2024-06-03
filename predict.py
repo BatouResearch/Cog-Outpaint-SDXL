@@ -181,22 +181,22 @@ class Predictor(BasePredictor):
 
         controlnet_canny = ControlNetModel.from_pretrained(
             CONTROLC_CACHE,
-            torch_dtype=torch.float16,
+            #torch_dtype=torch.float16,
         )
 
         print("Loading SDXL Controlnet pipeline...")
-        self.txt2img = StableDiffusionXLPipeline.from_pretrained(
+        self.txt2img = DiffusionPipeline.from_pretrained(
             SDXL_MODEL_CACHE,
-            torch_dtype=torch.float16,
+            #torch_dtype=torch.float16,
             use_safetensors=True,
-            #variant="fp16",
+            variant="fp16",
         ).to("cuda")
         self.pipe = StableDiffusionXLControlNetInpaintPipeline.from_pretrained(
             SDXL_MODEL_CACHE,
             controlnet=controlnet_canny,
-            torch_dtype=torch.float16,
+            #torch_dtype=torch.float16,
             use_safetensors=True,
-            #variant="fp16",
+            variant="fp16",
             vae=self.txt2img.vae,
             text_encoder=self.txt2img.text_encoder,
             text_encoder_2=self.txt2img.text_encoder_2,
@@ -374,7 +374,7 @@ class Predictor(BasePredictor):
             for k, v in self.token_map.items():
                 prompt = prompt.replace(k, v)
 
-        pipe = self.txt2img
+        pipe = self.pipe
 
         if not apply_watermark:
             # toggles watermark for this prediction
@@ -386,21 +386,21 @@ class Predictor(BasePredictor):
         
         loaded_image = self.load_image(image)
         print("Applying smart preprocessing...")
-        #sdxl_kwargs["image"] = fill_outpaint_area(loaded_image, outpaint_direction, outpaint_size, "patch")
-        #sdxl_kwargs["image"].save('first_image.png')
-        #sdxl_kwargs["mask_image"] = fill_outpaint_area(loaded_image, outpaint_direction, outpaint_size, "white", is_mask=True)
-        #sdxl_kwargs["mask_image"].save('mask_image.png')
-        #sdxl_kwargs["control_image"] = self.image2canny(sdxl_kwargs["image"])
-        #sdxl_kwargs["control_image"].save('control_image.png')
+        sdxl_kwargs["image"] = fill_outpaint_area(loaded_image, outpaint_direction, outpaint_size, "patch")
+        sdxl_kwargs["image"].save('first_image.png')
+        sdxl_kwargs["mask_image"] = fill_outpaint_area(loaded_image, outpaint_direction, outpaint_size, "white", is_mask=True)
+        sdxl_kwargs["mask_image"].save('mask_image.png')
+        sdxl_kwargs["control_image"] = self.image2canny(sdxl_kwargs["image"])
+        sdxl_kwargs["control_image"].save('control_image.png')
         
         common_args = {
             "prompt": [prompt] * num_outputs,
             "negative_prompt": [negative_prompt] * num_outputs,
             "guidance_scale": guidance_scale,
             "generator": generator,
-            #"controlnet_conditioning_scale": condition_scale,
+            "controlnet_conditioning_scale": condition_scale,
             "num_inference_steps": 20,
-            #"strength": 0.99
+            "strength": 0.99
         }
 
         if self.is_lora:
