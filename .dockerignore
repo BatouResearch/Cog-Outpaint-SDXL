@@ -2,3 +2,5 @@ sdxl-cache/text_encoder/model.safetensors
 sdxl-cache/text_encoder_2/model.safetensors
 sdxl-cache/unet/diffusion_pytorch_model.safetensors
 sdxl-cache/vae/diffusion_pytorch_model.safetensors
+controlnet-cache/models--diffusers--controlnet-canny-sdxl-1.0/blobs/ea99040544a999f814fd854575a3aee069a005d026864c8d321b82576706a221
+
