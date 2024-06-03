@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from pget import pget_manifest
 
 from image_utils import fill_outpaint_area
 from weights import WeightsDownloadCache
@@ -22,6 +23,7 @@ from diffusers import (
     HeunDiscreteScheduler,
     PNDMScheduler,
     StableDiffusionXLControlNetInpaintPipeline,
+StableDiffusionXLPipeline,
     ControlNetModel
 )
 from diffusers.models.attention_processor import LoRAAttnProcessor2_0
@@ -157,13 +159,7 @@ class Predictor(BasePredictor):
         """Load the model into memory to make running multiple predictions efficient"""
         start = time.time()
         
-        with open('manifest.pget', 'r') as f:
-            manifest = f.read()
-        for line in manifest.splitlines():
-            _, path = line.split(" ")
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-
-        subprocess.check_call(["pget","multifile", 'manifest.pget'])
+        pget_manifest()
         
         self.tuned_model = False
         self.tuned_weights = None
@@ -189,12 +185,25 @@ class Predictor(BasePredictor):
         )
 
         print("Loading SDXL Controlnet pipeline...")
+        self.txt2img = StableDiffusionXLPipeline.from_pretrained(
+            SDXL_MODEL_CACHE,
+            torch_dtype=torch.float16,
+            use_safetensors=True,
+            #variant="fp16",
+        ).to("cuda")
         self.pipe = StableDiffusionXLControlNetInpaintPipeline.from_pretrained(
             SDXL_MODEL_CACHE,
             controlnet=controlnet_canny,
             torch_dtype=torch.float16,
             use_safetensors=True,
-            variant="fp16",
+            #variant="fp16",
+            vae=self.txt2img.vae,
+            text_encoder=self.txt2img.text_encoder,
+            text_encoder_2=self.txt2img.text_encoder_2,
+            tokenizer=self.txt2img.tokenizer,
+            tokenizer_2=self.txt2img.tokenizer_2,
+            unet=self.txt2img.unet,
+            scheduler=self.txt2img.scheduler,
         )
         self.pipe.to("cuda")
         self.is_lora = False
@@ -365,7 +374,7 @@ class Predictor(BasePredictor):
             for k, v in self.token_map.items():
                 prompt = prompt.replace(k, v)
 
-        pipe = self.pipe
+        pipe = self.txt2img
 
         if not apply_watermark:
             # toggles watermark for this prediction
@@ -377,18 +386,21 @@ class Predictor(BasePredictor):
         
         loaded_image = self.load_image(image)
         print("Applying smart preprocessing...")
-        sdxl_kwargs["image"] = fill_outpaint_area(loaded_image, outpaint_direction, outpaint_size, "patch")
-        sdxl_kwargs["mask_image"] = fill_outpaint_area(loaded_image, outpaint_direction, outpaint_size, "white", is_mask=True)
-        sdxl_kwargs["control_image"] = self.image2canny(sdxl_kwargs["image"])
+        #sdxl_kwargs["image"] = fill_outpaint_area(loaded_image, outpaint_direction, outpaint_size, "patch")
+        #sdxl_kwargs["image"].save('first_image.png')
+        #sdxl_kwargs["mask_image"] = fill_outpaint_area(loaded_image, outpaint_direction, outpaint_size, "white", is_mask=True)
+        #sdxl_kwargs["mask_image"].save('mask_image.png')
+        #sdxl_kwargs["control_image"] = self.image2canny(sdxl_kwargs["image"])
+        #sdxl_kwargs["control_image"].save('control_image.png')
         
         common_args = {
             "prompt": [prompt] * num_outputs,
             "negative_prompt": [negative_prompt] * num_outputs,
             "guidance_scale": guidance_scale,
             "generator": generator,
-            "controlnet_conditioning_scale": condition_scale,
+            #"controlnet_conditioning_scale": condition_scale,
             "num_inference_steps": 20,
-            "strength": 0.99
+            #"strength": 0.99
         }
 
         if self.is_lora:
@@ -399,15 +411,16 @@ class Predictor(BasePredictor):
         if not apply_watermark:
             pipe.watermark = watermark_cache
 
-        _, has_nsfw_content = self.run_safety_checker(output.images)
+        #_, has_nsfw_content = self.run_safety_checker(output.images)
 
         output_paths = []
-        for i, nsfw in enumerate(has_nsfw_content):
-            if nsfw:
-                print(f"NSFW content detected in image {i}")
-                continue
+        #for i, nsfw in enumerate(has_nsfw_content):
+            #if nsfw:
+                #print(f"NSFW content detected in image {i}")
+                #continue
+        for i, img in enumerate(output.images):
             output_path = f"/tmp/out-{i}.png"
-            output.images[i].save(output_path)
+            img.save(output_path)
             output_paths.append(Path(output_path))
 
         if len(output_paths) == 0:
