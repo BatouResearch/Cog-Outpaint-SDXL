@@ -1,0 +1,4 @@
+sdxl-cache/text_encoder/model.safetensors
+sdxl-cache/text_encoder_2/model.safetensors
+sdxl-cache/unet/diffusion_pytorch_model.safetensors
+sdxl-cache/vae/diffusion_pytorch_model.safetensors
