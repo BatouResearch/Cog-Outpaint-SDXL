@@ -1,0 +1,4 @@
+https://weights.replicate.delivery/wqzt/p_6aa85b207bcb6d259977c84d5a7f7552a8faf1732be592975801d1f035ebc5c6/multi-model-01d3c3/src/sdxl-cache/text_encoder/model.safetensors sdxl-cache/text_encoder/model.safetensors
+https://weights.replicate.delivery/wqzt/p_6aa85b207bcb6d259977c84d5a7f7552a8faf1732be592975801d1f035ebc5c6/multi-model-01d3c3/src/sdxl-cache/text_encoder_2/model.safetensors sdxl-cache/text_encoder_2/model.safetensors
+https://weights.replicate.delivery/wqzt/p_6aa85b207bcb6d259977c84d5a7f7552a8faf1732be592975801d1f035ebc5c6/multi-model-01d3c3/src/sdxl-cache/unet/diffusion_pytorch_model.safetensors sdxl-cache/unet/diffusion_pytorch_model.safetensors
+https://weights.replicate.delivery/wqzt/p_6aa85b207bcb6d259977c84d5a7f7552a8faf1732be592975801d1f035ebc5c6/multi-model-01d3c3/src/sdxl-cache/vae/diffusion_pytorch_model.safetensors sdxl-cache/vae/diffusion_pytorch_model.safetensors

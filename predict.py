@@ -156,6 +156,15 @@ class Predictor(BasePredictor):
     def setup(self, weights: Optional[Path] = None):
         """Load the model into memory to make running multiple predictions efficient"""
         start = time.time()
+        
+        with open('manifest.pget', 'r') as f:
+            manifest = f.read()
+        for line in manifest.splitlines():
+            _, path = line.split(" ")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+
+        subprocess.check_call(["pget","multifile", 'manifest.pget'])
+        
         self.tuned_model = False
         self.tuned_weights = None
         if str(weights) == "weights":
