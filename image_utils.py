@@ -24,15 +24,11 @@ def fill_outpaint_area(image, outpaint_direction, outpaint_size, color, is_mask=
         new_image.paste(image, paste_position)
 
     if color == 'patch':
-        print("color == patch")
         return fill_with_patchmatch(new_image, outpaint_direction, outpaint_size)
     else:
-
-        print("color!=patch")
         return fill_with_color(new_image, outpaint_direction, outpaint_size, color)
 
 def fill_with_patchmatch(image, outpaint_direction, outpaint_size):
-    image.save('input_patch_image.png')
     original_width, original_height = image.size
     new_size = image.size
 
@@ -52,14 +48,12 @@ def fill_with_patchmatch(image, outpaint_direction, outpaint_size):
         end_time = time.time() * 1000  # Get the current time again after the function has completed
         elapsed_time_ms = end_time - start_time
         print(f"PatchMatch completed, time taken: {elapsed_time_ms} ms")
-        Image.fromarray(result).save('PatchMatch_image.png')
         return Image.fromarray(result)
     else:
         print("PatchMatch is not available.")
         return image
 
 def fill_with_color(image, outpaint_direction, outpaint_size, color):
-    image.save('color_input.png')
     color_area = {
         'left': (0, 0, outpaint_size, image.height),
         'right': (image.width - outpaint_size, 0, image.width, image.height),
@@ -67,6 +61,5 @@ def fill_with_color(image, outpaint_direction, outpaint_size, color):
         'down': (0, image.height - outpaint_size, image.width, image.height)
     }[outpaint_direction]
     draw = ImageDraw.Draw(image)
-    image.save('draw.png')
     draw.rectangle(color_area, fill=color)
     return image

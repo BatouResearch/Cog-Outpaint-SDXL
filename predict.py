@@ -181,29 +181,16 @@ class Predictor(BasePredictor):
 
         controlnet_canny = ControlNetModel.from_pretrained(
             CONTROLC_CACHE,
-            #torch_dtype=torch.float16,
+            torch_dtype=torch.float16,
         )
 
         print("Loading SDXL Controlnet pipeline...")
-        self.txt2img = DiffusionPipeline.from_pretrained(
-            SDXL_MODEL_CACHE,
-            #torch_dtype=torch.float16,
-            use_safetensors=True,
-            variant="fp16",
-        ).to("cuda")
         self.pipe = StableDiffusionXLControlNetInpaintPipeline.from_pretrained(
             SDXL_MODEL_CACHE,
             controlnet=controlnet_canny,
-            #torch_dtype=torch.float16,
+            torch_dtype=torch.float16,
             use_safetensors=True,
             variant="fp16",
-            vae=self.txt2img.vae,
-            text_encoder=self.txt2img.text_encoder,
-            text_encoder_2=self.txt2img.text_encoder_2,
-            tokenizer=self.txt2img.tokenizer,
-            tokenizer_2=self.txt2img.tokenizer_2,
-            unet=self.txt2img.unet,
-            scheduler=self.txt2img.scheduler,
         )
         self.pipe.to("cuda")
         self.is_lora = False
@@ -315,7 +302,7 @@ class Predictor(BasePredictor):
         ),
         condition_scale: float = Input(
             description="The bigger this number is, the more ControlNet interferes",
-            default=0.15,
+            default=0.25,
             ge=0.0,
             le=1.0,
         ),
@@ -386,12 +373,10 @@ class Predictor(BasePredictor):
         
         loaded_image = self.load_image(image)
         print("Applying smart preprocessing...")
+
         sdxl_kwargs["image"] = fill_outpaint_area(loaded_image, outpaint_direction, outpaint_size, "patch")
-        sdxl_kwargs["image"].save('first_image.png')
         sdxl_kwargs["mask_image"] = fill_outpaint_area(loaded_image, outpaint_direction, outpaint_size, "white", is_mask=True)
-        sdxl_kwargs["mask_image"].save('mask_image.png')
         sdxl_kwargs["control_image"] = self.image2canny(sdxl_kwargs["image"])
-        sdxl_kwargs["control_image"].save('control_image.png')
         
         common_args = {
             "prompt": [prompt] * num_outputs,
@@ -411,16 +396,15 @@ class Predictor(BasePredictor):
         if not apply_watermark:
             pipe.watermark = watermark_cache
 
-        #_, has_nsfw_content = self.run_safety_checker(output.images)
+        _, has_nsfw_content = self.run_safety_checker(output.images)
 
         output_paths = []
-        #for i, nsfw in enumerate(has_nsfw_content):
-            #if nsfw:
-                #print(f"NSFW content detected in image {i}")
-                #continue
-        for i, img in enumerate(output.images):
+        for i, nsfw in enumerate(has_nsfw_content):
+            if nsfw:
+                print(f"NSFW content detected in image {i}")
+                continue
             output_path = f"/tmp/out-{i}.png"
-            img.save(output_path)
+            output.images[i].save(output_path)
             output_paths.append(Path(output_path))
 
         if len(output_paths) == 0:
