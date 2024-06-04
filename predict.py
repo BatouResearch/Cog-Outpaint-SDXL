@@ -254,28 +254,38 @@ class Predictor(BasePredictor):
         )
         return image, has_nsfw_concept
         
-    def add_outpaint_pixels(self, image, outpaint_direction, outpaint_size, color):
+    def add_outpaint_pixels(self, image, outpaint_directions, outpaint_size1, outpaint_size2, color):
         """
         Outpaints the given PIL image in the specified direction by the given size.
         If the color is 'noise', it outpaints with blocky (4x4 by default) noisy pixels.
         """
+        
         original_width, original_height = image.size
-
-        if outpaint_direction == 'left':
-            new_size = (original_width + outpaint_size, original_height)
+        
+        if outpaint_direction == 'horizontal':
+            #left side
+            new_size = (original_width + outpaint_size2, original_height)
             paste_position = (outpaint_size, 0)
-        elif outpaint_direction == 'right':
-            new_size = (original_width + outpaint_size, original_height)
+            new_image = Image.new("RGB", new_size, color)
+            new_image.paste(image, paste_position)
+            # right side
+            new_size = (new_image.size[0] + outpaint_size1, original_height)
             paste_position = (0, 0)
-        elif outpaint_direction == 'up':
-            new_size = (original_width, original_height + outpaint_size)
+            new_image = Image.new("RGB", new_size, color)
+            new_image.paste(image, paste_position)
+        elif outpaint_direction == 'vertical':
+            # up side
+            new_size = (original_width, original_height + outpaint_size1)
             paste_position = (0, outpaint_size)
-        else:  # 'down'
-            new_size = (original_width, original_height + outpaint_size)
+            new_image = Image.new("RGB", new_size, color)
+            new_image.paste(image, paste_position)
+            # down side
+            new_size = (original_width, original_height + outpaint_size2)
             paste_position = (0, 0)
-
-        new_image = Image.new("RGB", new_size, color)
-        new_image.paste(image, paste_position)
+            new_image = Image.new("RGB", new_size, color)
+            new_image.paste(image, paste_position)
+        print("Original size: ", image.size)
+        print("New size: ", new_image.size)
         return new_image
     
     @torch.inference_mode()
@@ -285,16 +295,29 @@ class Predictor(BasePredictor):
             description="Input prompt",
             default="An astronaut riding a rainbow unicorn",
         ),
-        outpaint_direction: str = Input(
-            description="In what direction to outpaint",
-            choices=["left", "right", "up", "down"],
-            default="down",
-        ),
-        outpaint_size: int = Input(
-            description="How many pixels the mask should grow in the chosen direction",
-            ge=128,
+        outpaint_left: int = Input(
+            description="How many pixels the mask should grow in the left direction",
+            ge=0,
             le=512,
-            default=128
+            default=0
+        ),
+        outpaint_right: int = Input(
+            description="How many pixels the mask should grow in the right direction",
+            ge=0,
+            le=512,
+            default=0
+        ),
+        outpaint_down: int = Input(
+            description="How many pixels the mask should grow in the down direction",
+            ge=0,
+            le=512,
+            default=0
+        ),
+        outpaint_up: int = Input(
+            description="How many pixels the mask should grow in the up direction",
+            ge=0,
+            le=512,
+            default=0
         ),
         image: Path = Input(
             description="Input image to inpaint",
@@ -302,7 +325,7 @@ class Predictor(BasePredictor):
         ),
         condition_scale: float = Input(
             description="The bigger this number is, the more ControlNet interferes",
-            default=0.25,
+            default=0.15,
             ge=0.0,
             le=1.0,
         ),
@@ -374,8 +397,10 @@ class Predictor(BasePredictor):
         loaded_image = self.load_image(image)
         print("Applying smart preprocessing...")
 
-        sdxl_kwargs["image"] = fill_outpaint_area(loaded_image, outpaint_direction, outpaint_size, "patch")
-        sdxl_kwargs["mask_image"] = fill_outpaint_area(loaded_image, outpaint_direction, outpaint_size, "white", is_mask=True)
+        outpaint_sizes = { "left":outpaint_left, "up":outpaint_up, "right":outpaint_right, "down":outpaint_down}
+
+        sdxl_kwargs["image"] = fill_outpaint_area(loaded_image, outpaint_sizes, "patch")
+        sdxl_kwargs["mask_image"] = fill_outpaint_area(loaded_image, outpaint_sizes, "black", is_mask=True)
         sdxl_kwargs["control_image"] = self.image2canny(sdxl_kwargs["image"])
         
         common_args = {
